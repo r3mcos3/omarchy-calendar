@@ -266,6 +266,14 @@ cp "$SCRIPT_DIR/systemd/omarchy-calendar-sync."{service,timer} "$HOME/.config/sy
 # The shipped unit assumes the standard plugin directory. Point it at wherever
 # this checkout actually lives, so a hand-cloned repo works too.
 sed -i "s|^ExecStart=.*|ExecStart=$SYNC_BIN|" "$HOME/.config/systemd/user/omarchy-calendar-sync.service"
+# gwsPath being absolute is not always enough on its own: an npm/mise install
+# of gws is a "#!/usr/bin/env node" launcher, not a static binary, so it needs
+# node itself resolvable on PATH too. The unit's fallback PATH only lists
+# bun/cargo/pipx locations, so prepend wherever gws actually resolved from
+# right now -- this covers node, npm's own global bin, or anything else the
+# static list did not anticipate.
+gws_dir=$(dirname "$gws_path")
+sed -i "s|^Environment=PATH=|Environment=PATH=$gws_dir:|" "$HOME/.config/systemd/user/omarchy-calendar-sync.service"
 systemctl --user daemon-reload
 systemctl --user enable --now omarchy-calendar-sync.timer
 
