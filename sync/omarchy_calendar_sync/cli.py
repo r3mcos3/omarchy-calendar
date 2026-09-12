@@ -127,8 +127,14 @@ def _drop_duplicates(gevents, seen):
     return fresh
 
 
-def run(client, cfg, now, out_path, local_tz):
-    """Fetch, normalize, write. Returns a process exit code."""
+def run(client, cfg, now, out_path, local_tz, quiet=False):
+    """Fetch, normalize, write. Returns a process exit code.
+
+    `quiet` silences the one line this prints on success. Everything else
+    already goes to stderr; that line is the exception, and write.py's
+    post-write resync needs stdout clean because --write-event's JSON
+    result is the only thing meant to be there.
+    """
     try:
         client.check()
         calendars = config_module.select_calendars(client.calendars(), cfg)
@@ -162,7 +168,8 @@ def run(client, cfg, now, out_path, local_tz):
         return EXIT_SYNC_FAILED
 
     write_atomic(out_path, doc)
-    print(f"wrote {len(rows)} rows from {len(calendars)} calendars to {out_path}")
+    if not quiet:
+        print(f"wrote {len(rows)} rows from {len(calendars)} calendars to {out_path}")
     return EXIT_OK
 
 

@@ -1,3 +1,5 @@
+import contextlib
+import io
 import unittest
 
 from omarchy_calendar_sync import write
@@ -28,6 +30,21 @@ class FakeClient:
         if self.raise_error:
             raise self.raise_error
         return {}
+
+    # The methods below let this double stand in for cli.run()'s real
+    # resync too, not just the write itself -- needed to test that the
+    # resync it triggers stays quiet on stdout.
+    def check(self):
+        return None
+
+    def version(self):
+        return (0, 22, 5)
+
+    def calendars(self):
+        return [{"id": "a@example.com", "name": "Personal", "color": "#f83a22"}]
+
+    def events(self, calendar_id, time_min, time_max):
+        return []
 
 
 def resynced_flag():
@@ -141,6 +158,36 @@ class TestHandleCreate(unittest.TestCase):
         self.assertEqual(client.calls[0][0], "insert")
         self.assertEqual(client.calls[0][1], "a@example.com")
         self.assertEqual(resynced, [True])
+
+    def test_real_resync_prints_nothing_to_stdout(self):
+        # --write-event's stdout is the JSON result, read by the panel with
+        # JSON.parse. run()'s own "wrote N rows..." line landing on the same
+        # stream (this test leaves `resync` as None, so the real _resync
+        # runs) would break that parse even though the write itself succeeded.
+        import tempfile
+        from pathlib import Path
+
+        client = FakeClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "calendar-events.json"
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                result = write.handle(
+                    {
+                        "action": "create",
+                        "calendarId": "a@example.com",
+                        "title": "Lunch",
+                        "start": "2026-08-10T09:00:00",
+                        "end": "2026-08-10T10:00:00",
+                    },
+                    cfg={"profile": "/tmp/profile", "gwsPath": "gws", "calendars": {"include": [], "exclude": []}, "window": {"pastDays": 7, "futureDays": 60}},
+                    client=client,
+                    out_path=out_path,
+                )
+
+            self.assertEqual(result, {"status": "success"})
+            self.assertEqual(captured.getvalue(), "")
+            self.assertTrue(out_path.exists())
 
     def test_bad_form_fields_never_reach_the_client(self):
         client = FakeClient()

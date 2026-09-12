@@ -55,12 +55,13 @@ def _event_body(payload):
     return body
 
 
-def handle(payload, cfg=None, client=None, resync=None):
+def handle(payload, cfg=None, client=None, resync=None, out_path=None):
     """Perform one write action and resync. Returns a JSON-safe result dict.
 
     `client` and `resync` are injectable so tests never shell out to gws or
     touch the real contract file; production calls leave both to build the
-    real ones from `cfg`.
+    real ones from `cfg`. `out_path` only matters when `resync` is left as
+    None, since it is passed straight through to the real `_resync`.
     """
     if not isinstance(payload, dict):
         return {"status": "error", "message": "payload must be a JSON object"}
@@ -97,20 +98,25 @@ def handle(payload, cfg=None, client=None, resync=None):
     if resync is not None:
         resync()
     else:
-        _resync(client, cfg)
+        _resync(client, cfg, out_path)
 
     return {"status": "success"}
 
 
-def _resync(client, cfg):
+def _resync(client, cfg, out_path=None):
     """Best-effort immediate refresh, so the change shows without a 5 minute wait.
 
     A failure here is not the write's failure: the event already landed on (or
     left) Google Calendar, and the next scheduled sync picks it up regardless.
     """
+    out_path = out_path if out_path is not None else cli_module.contract.CONTRACT_PATH
     try:
         now = datetime.now(timezone.utc)
         local_tz = cli_module.resolve_local_timezone()
-        cli_module.run(client, cfg, now, cli_module.contract.CONTRACT_PATH, local_tz)
+        # quiet=True: --write-event's stdout is the JSON result and nothing
+        # else. run()'s own "wrote N rows..." line would otherwise share
+        # stdout with it, and the panel's JSON.parse has no way to tell the
+        # two apart.
+        cli_module.run(client, cfg, now, out_path, local_tz, quiet=True)
     except Exception:
         pass
