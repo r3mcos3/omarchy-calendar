@@ -299,6 +299,23 @@ Panel {
     })
   }
 
+  // Every field in the form needs this, not just the title: the panel's
+  // PanelKeyCatcher is blocked while eventFormOpen (so a plain letter typed
+  // into a field cannot fall through as a panel shortcut), and a blocked
+  // PanelKeyCatcher forwards Escape to descendants instead of closing
+  // anything -- so whichever field has focus is the only thing that can
+  // still act on it. Without this on every field, tabbing into "Location"
+  // and pressing Escape does nothing at all, and the panel is stuck open.
+  function handleEventFormKey(event) {
+    if (event.key === Qt.Key_Escape) {
+      root.closeEventForm()
+      event.accepted = true
+    } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+      root.submitEventForm()
+      event.accepted = true
+    }
+  }
+
   function toggleWorkingLocation() {
     persistSettings({ showWorkingLocation: !root.showWorkingLocation })
   }
@@ -1466,15 +1483,7 @@ Panel {
               foreground: root.contentForeground
               font.family: root.contentFontFamily
 
-              Keys.onPressed: function(event) {
-                if (event.key === Qt.Key_Escape) {
-                  root.closeEventForm()
-                  event.accepted = true
-                } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                  root.submitEventForm()
-                  event.accepted = true
-                }
-              }
+              Keys.onPressed: function(event) { root.handleEventFormKey(event) }
             }
 
             Text {
@@ -1600,6 +1609,8 @@ Panel {
                 foreground: root.contentForeground
                 font.family: root.contentFontFamily
                 inputMethodHints: Qt.ImhTime
+
+                Keys.onPressed: function(event) { root.handleEventFormKey(event) }
               }
 
               TextField {
@@ -1609,6 +1620,8 @@ Panel {
                 foreground: root.contentForeground
                 font.family: root.contentFontFamily
                 inputMethodHints: Qt.ImhTime
+
+                Keys.onPressed: function(event) { root.handleEventFormKey(event) }
               }
             }
 
@@ -1618,6 +1631,8 @@ Panel {
               placeholderText: qsTr("Location (optional)")
               foreground: root.contentForeground
               font.family: root.contentFontFamily
+
+              Keys.onPressed: function(event) { root.handleEventFormKey(event) }
             }
 
             TextField {
@@ -1626,6 +1641,8 @@ Panel {
               placeholderText: qsTr("Description (optional)")
               foreground: root.contentForeground
               font.family: root.contentFontFamily
+
+              Keys.onPressed: function(event) { root.handleEventFormKey(event) }
             }
 
             Text {
