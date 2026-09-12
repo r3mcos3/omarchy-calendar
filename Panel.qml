@@ -86,6 +86,10 @@ Panel {
   // was installed by `omarchy plugin add` or cloned somewhere by hand.
   readonly property string setupCommand: Model.commandPathFromUrl(
     Qt.resolvedUrl("sync/setup"), Quickshell.env("HOME") || "")
+
+  // Real, absolute path (not the ~-shortened display form `setupCommand`
+  // uses), because this one is actually executed rather than shown.
+  readonly property string syncBinaryPath: Qt.resolvedUrl("sync/omarchy-calendar-sync").toString().replace(/^file:\/\//, "")
   readonly property string syncState: eventVersionMismatch
     ? "version"
     : Model.syncState(eventDoc, Date.now(), syncIntervalSeconds)
@@ -186,6 +190,115 @@ Panel {
 
   property bool settingsOpen: false
 
+  // ---- Adding and editing events. `editingEvent` holds the row being
+  //      edited (null means "creating a new one"), so one form and one
+  //      write path serve both. The day itself is never editable here: an
+  //      event moves to another day by being deleted and recreated there,
+  //      which keeps this form to the fields that actually need one.
+  property bool addingEvent: false
+  property var editingEvent: null
+  readonly property bool eventFormOpen: root.addingEvent || root.editingEvent !== null
+  property bool eventAllDay: false
+  property string eventCalendarId: ""
+  property string eventFormError: ""
+  property bool eventFormSubmitting: false
+  property string pendingEventPayload: ""
+
+  function firstWritableCalendarId() {
+    return (root.knownCalendars && root.knownCalendars.length > 0) ? root.knownCalendars[0].id : ""
+  }
+
+  function openAddEvent() {
+    root.settingsOpen = false
+    root.editingEvent = null
+    root.eventAllDay = false
+    root.eventCalendarId = root.firstWritableCalendarId()
+    root.eventFormError = ""
+    root.eventFormSubmitting = false
+    root.addingEvent = true
+    Qt.callLater(function() {
+      eventTitleField.text = ""
+      eventStartField.text = "09:00"
+      eventEndField.text = "10:00"
+      eventLocationField.text = ""
+      eventDescriptionField.text = ""
+      eventTitleField.forceActiveFocus()
+    })
+  }
+
+  function openEditEvent(event) {
+    if (!event) return
+    root.settingsOpen = false
+    root.addingEvent = false
+    root.eventAllDay = !!event.allDay
+    root.eventCalendarId = event.calendarId || ""
+    root.eventFormError = ""
+    root.eventFormSubmitting = false
+    root.editingEvent = event
+    Qt.callLater(function() {
+      eventTitleField.text = event.title || ""
+      eventStartField.text = event.allDay ? "09:00" : Qt.formatDateTime(new Date(event.start), "HH:mm")
+      eventEndField.text = event.allDay ? "10:00" : Qt.formatDateTime(new Date(event.end), "HH:mm")
+      eventLocationField.text = event.location || ""
+      eventDescriptionField.text = ""
+      eventTitleField.forceActiveFocus()
+    })
+  }
+
+  function closeEventForm() {
+    root.addingEvent = false
+    root.editingEvent = null
+    root.eventFormError = ""
+    root.eventFormSubmitting = false
+  }
+
+  function runEventWrite(payload) {
+    root.eventFormSubmitting = true
+    root.eventFormError = ""
+    root.pendingEventPayload = JSON.stringify(payload)
+    eventWriteProc.command = [root.syncBinaryPath, "--write-event"]
+    eventWriteProc.running = true
+  }
+
+  function submitEventForm() {
+    var title = String(eventTitleField.text || "").trim()
+    if (!title) {
+      root.eventFormError = qsTr("Please enter a title")
+      return
+    }
+    if (!root.eventCalendarId) {
+      root.eventFormError = qsTr("Choose a calendar")
+      return
+    }
+
+    var dateKey = root.editingEvent ? root.editingEvent.dateKey : root.selectedDayKey
+    var startIso = root.eventAllDay ? dateKey : (dateKey + "T" + eventStartField.text + ":00")
+    var endIso = root.eventAllDay ? dateKey : (dateKey + "T" + eventEndField.text + ":00")
+
+    var payload = {
+      action: root.editingEvent ? "update" : "create",
+      calendarId: root.eventCalendarId,
+      title: title,
+      start: startIso,
+      end: endIso,
+      allDay: root.eventAllDay,
+      location: String(eventLocationField.text || "").trim(),
+      description: String(eventDescriptionField.text || "").trim()
+    }
+    if (root.editingEvent) payload.eventId = root.editingEvent.id
+
+    root.runEventWrite(payload)
+  }
+
+  function deleteEditingEvent() {
+    if (!root.editingEvent) return
+    root.runEventWrite({
+      action: "delete",
+      calendarId: root.editingEvent.calendarId,
+      eventId: root.editingEvent.id
+    })
+  }
+
   function toggleWorkingLocation() {
     persistSettings({ showWorkingLocation: !root.showWorkingLocation })
   }
@@ -254,6 +367,7 @@ Panel {
     // Dismissing the panel mid-edit would otherwise leave the inputs up,
     // waiting behind a closed popup for the next time it opens.
     if (root.editingLife) root.cancelEditingLife()
+    if (root.eventFormOpen) root.closeEventForm()
   }
 
   function toggle() {
@@ -412,6 +526,36 @@ Panel {
     onTriggered: root.setupCommandCopied = false
   }
 
+  // Runs `omarchy-calendar-sync --write-event`, handing it one action as
+  // JSON over stdin. It replies with one JSON line: {"status": "success"}
+  // or {"status": "error", "message": "..."}, after already resyncing on
+  // success, so eventsFile.reload() below sees the change immediately
+  // rather than waiting for the next timer tick.
+  Process {
+    id: eventWriteProc
+    stdinEnabled: true
+    onStarted: write(root.pendingEventPayload + "\n")
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.eventFormSubmitting = false
+        root.pendingEventPayload = ""
+
+        var result = null
+        try { result = JSON.parse(text) } catch (error) { result = null }
+
+        if (result && result.status === "success") {
+          root.closeEventForm()
+          eventsFile.reload()
+        } else {
+          root.eventFormError = (result && result.message)
+            ? result.message
+            : qsTr("Something went wrong. Check journalctl --user -u omarchy-calendar-sync.")
+        }
+      }
+    }
+  }
+
   SystemClock {
     id: clock
     precision: SystemClock.Minutes
@@ -439,7 +583,7 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: root.editingLife
+      blocked: root.editingLife || root.eventFormOpen
       onMoveRequested: function(dx, dy) {
         if (dx !== 0) root.moveMonth(dx)
         if (dy !== 0) root.moveYear(dy)
@@ -483,13 +627,27 @@ Panel {
             // Sits in the hero's right margin rather than in the row itself,
             // so turning it on and off never shifts the date off centre.
             PanelActionButton {
+              id: settingsButton
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               iconText: root.settingsOpen ? "󰅖" : "󰒓"
               tooltipText: root.settingsOpen ? "Back to calendar" : "Settings"
               foreground: root.contentForeground
               fontFamily: root.contentFontFamily
-              onClicked: root.settingsOpen = !root.settingsOpen
+              onClicked: {
+                if (!root.settingsOpen) root.closeEventForm()
+                root.settingsOpen = !root.settingsOpen
+              }
+            }
+
+            PanelActionButton {
+              anchors.right: settingsButton.left
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: root.eventFormOpen ? "󰅖" : "󰐕"
+              tooltipText: root.eventFormOpen ? "Cancel" : "Add event"
+              foreground: root.contentForeground
+              fontFamily: root.contentFontFamily
+              onClicked: root.eventFormOpen ? root.closeEventForm() : root.openAddEvent()
             }
 
             Row {
@@ -549,7 +707,7 @@ Panel {
           //      a plain hairline said nothing, and whole days done
           //      over days in the year says the same thing louder.
           Item {
-            visible: !root.settingsOpen
+            visible: !root.settingsOpen && !root.eventFormOpen
             width: parent.width
             height: yearBlock.y + yearBlock.height
 
@@ -707,7 +865,7 @@ Panel {
           //      given an age; the same rail as the year above it, measured
           //      against a nominal lifetime.
           Item {
-            visible: !root.settingsOpen && root.showYearProgress && root.birthYear > 0
+            visible: !root.settingsOpen && !root.eventFormOpen && root.showYearProgress && root.birthYear > 0
             width: parent.width
             height: visible ? lifeBlock.height : 0
 
@@ -781,7 +939,7 @@ Panel {
           //      the seven day columns. Always six rows, so the popup is
           //      exactly as tall in February as it is in August.
           Item {
-            visible: !root.settingsOpen
+            visible: !root.settingsOpen && !root.eventFormOpen
             width: parent.width
             height: gridColumn.y + gridColumn.height
 
@@ -978,7 +1136,7 @@ Panel {
           //      The label is centered and fixed-width, so it holds still
           //      from "MAY" to "SEPTEMBER".
           Item {
-            visible: !root.settingsOpen
+            visible: !root.settingsOpen && !root.eventFormOpen
             width: parent.width
             height: monthNav.height
 
@@ -1033,7 +1191,7 @@ Panel {
           //      the selection survives stepping to another month and an
           //      undated list would then be a quiet lie.
           Column {
-            visible: !root.settingsOpen
+            visible: !root.settingsOpen && !root.eventFormOpen
             width: gridColumn.width
             anchors.horizontalCenter: parent.horizontalCenter
             spacing: Style.space(4)
@@ -1074,17 +1232,59 @@ Panel {
                             root.contentForeground.b, 0.08)
                   : "transparent"
 
-                // Only rows that can actually do something respond to a click.
+                // Always on, unlike the tap handlers below: the edit icon
+                // needs to know about hover even on a row with nothing else
+                // clickable.
                 HoverHandler {
                   id: eventHover
-                  enabled: eventRow.openable || eventRow.joinable
-                  cursorShape: Qt.PointingHandCursor
+                  cursorShape: (eventRow.openable || eventRow.joinable) ? Qt.PointingHandCursor : Qt.ArrowCursor
+                }
+
+                // Reserved at a fixed width whether or not it is showing, so
+                // hovering a row never shifts the Join button or the title
+                // beside it.
+                Rectangle {
+                  id: editButton
+                  visible: eventHover.hovered
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(20)
+                  height: width
+                  radius: width / 2
+                  color: editHover.hovered
+                    ? Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.12)
+                    : "transparent"
+
+                  HoverHandler {
+                    id: editHover
+                    cursorShape: Qt.PointingHandCursor
+                  }
+
+                  TapHandler {
+                    gesturePolicy: TapHandler.ReleaseWithinBounds
+                    onTapped: root.openEditEvent(eventRow.modelData)
+                  }
+
+                  Text {
+                    anchors.centerIn: parent
+                    text: "󰏫"
+                    color: Qt.darker(root.contentForeground, 1.4)
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  PanelToolTip {
+                    visible: editHover.hovered
+                    text: qsTr("Edit")
+                    fontFamily: root.contentFontFamily
+                  }
                 }
 
                 Rectangle {
                   id: joinButton
                   visible: eventRow.joinable
-                  anchors.right: parent.right
+                  anchors.right: editButton.left
+                  anchors.rightMargin: Style.space(3)
                   anchors.verticalCenter: parent.verticalCenter
                   width: joinLabel.implicitWidth + Style.space(8)
                   height: joinLabel.implicitHeight + Style.space(3)
@@ -1122,14 +1322,14 @@ Panel {
                 Row {
                   id: eventBody
                   anchors.left: parent.left
-                  anchors.right: eventRow.joinable ? joinButton.left : parent.right
-                  anchors.rightMargin: eventRow.joinable ? Style.space(3) : 0
+                  anchors.right: eventRow.joinable ? joinButton.left : editButton.left
+                  anchors.rightMargin: Style.space(3)
                   anchors.verticalCenter: parent.verticalCenter
                   spacing: Style.space(4)
 
                   // Deliberately here and not on the row: this stops at the
-                  // Join button's left edge, so the two hit areas cannot
-                  // overlap. Two TapHandlers over one point would both fire
+                  // Join or edit button's left edge, so the two hit areas
+                  // cannot overlap. Two TapHandlers over one point would both fire
                   // and open two tabs.
                   TapHandler {
                     enabled: eventRow.openable
@@ -1225,6 +1425,303 @@ Panel {
                     : qsTr("Nothing scheduled")
             }
 
+          }
+
+          // ---- Add / edit event, shown in place of the grid. One form
+          //      serves both: `root.editingEvent` says which mode this is
+          //      and which write action gets sent. The day itself is fixed
+          //      (the selected day when creating, the event's own day when
+          //      editing) rather than editable here -- moving an event to
+          //      another day means deleting it and adding it there instead.
+          Column {
+            visible: root.eventFormOpen
+            width: gridColumn.width
+            anchors.horizontalCenter: parent.horizontalCenter
+            spacing: Style.space(8)
+
+            Text {
+              width: parent.width
+              text: root.editingEvent ? qsTr("EDIT EVENT") : qsTr("NEW EVENT")
+              color: Qt.darker(root.contentForeground, 1.4)
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.caption
+              font.letterSpacing: 1
+              font.bold: true
+            }
+
+            Text {
+              width: parent.width
+              text: Qt.formatDate(
+                Model.dateFromKey(root.editingEvent ? root.editingEvent.dateKey : root.selectedDayKey, root.today),
+                "dddd d MMMM")
+              color: Qt.darker(root.contentForeground, 1.9)
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            TextField {
+              id: eventTitleField
+              width: parent.width
+              placeholderText: qsTr("Title")
+              foreground: root.contentForeground
+              font.family: root.contentFontFamily
+
+              Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Escape) {
+                  root.closeEventForm()
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                  root.submitEventForm()
+                  event.accepted = true
+                }
+              }
+            }
+
+            Text {
+              visible: root.knownCalendars.length > 0
+              text: qsTr("CALENDAR")
+              color: Qt.darker(root.contentForeground, 1.5)
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.caption
+              font.letterSpacing: 1
+              font.bold: true
+            }
+
+            Flow {
+              width: parent.width
+              visible: root.knownCalendars.length > 0
+              spacing: Style.space(4)
+
+              Repeater {
+                model: root.knownCalendars
+
+                Rectangle {
+                  id: calendarChip
+                  required property var modelData
+                  readonly property bool active: modelData.id === root.eventCalendarId
+
+                  width: chipRow.implicitWidth + Style.space(16)
+                  height: chipRow.implicitHeight + Style.space(6)
+                  radius: height / 2
+                  color: calendarChip.active
+                    ? Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.14)
+                    : "transparent"
+                  border.width: Style.spacing.hairline
+                  border.color: calendarChip.active
+                    ? Qt.darker(root.contentForeground, 1.4)
+                    : Qt.darker(root.contentForeground, 2.4)
+
+                  TapHandler { onTapped: root.eventCalendarId = calendarChip.modelData.id }
+
+                  Row {
+                    id: chipRow
+                    anchors.centerIn: parent
+                    spacing: Style.space(4)
+
+                    Rectangle {
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: Style.space(4)
+                      height: width
+                      radius: width / 2
+                      color: calendarChip.modelData.color || "transparent"
+                    }
+
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: calendarChip.modelData.name
+                      color: calendarChip.active ? root.contentForeground : Qt.darker(root.contentForeground, 1.5)
+                      font.family: root.contentFontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+                }
+              }
+            }
+
+            Text {
+              width: parent.width
+              visible: root.knownCalendars.length === 0
+              text: qsTr("No calendars synced yet, so there is nothing to add this to.")
+              color: Qt.darker(root.contentForeground, 1.9)
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            // A small inline switch rather than SettingsView's ToggleRow:
+            // that component is scoped to SettingsView.qml, and one boolean
+            // does not earn a whole file of its own.
+            Rectangle {
+              width: parent.width
+              height: allDayRow.height + Style.space(6)
+              radius: Style.cornerRadius
+              color: allDayHover.hovered
+                ? Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.06)
+                : "transparent"
+
+              HoverHandler { id: allDayHover }
+              TapHandler { onTapped: root.eventAllDay = !root.eventAllDay }
+
+              Row {
+                id: allDayRow
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(3)
+                spacing: Style.space(4)
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(14)
+                  text: root.eventAllDay ? "✓" : ""
+                  color: root.contentForeground
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: qsTr("All day")
+                  color: root.contentForeground
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+            }
+
+            Row {
+              width: parent.width
+              visible: !root.eventAllDay
+              spacing: Style.space(8)
+
+              TextField {
+                id: eventStartField
+                width: (parent.width - Style.space(8)) / 2
+                placeholderText: "09:00"
+                foreground: root.contentForeground
+                font.family: root.contentFontFamily
+                inputMethodHints: Qt.ImhTime
+              }
+
+              TextField {
+                id: eventEndField
+                width: (parent.width - Style.space(8)) / 2
+                placeholderText: "10:00"
+                foreground: root.contentForeground
+                font.family: root.contentFontFamily
+                inputMethodHints: Qt.ImhTime
+              }
+            }
+
+            TextField {
+              id: eventLocationField
+              width: parent.width
+              placeholderText: qsTr("Location (optional)")
+              foreground: root.contentForeground
+              font.family: root.contentFontFamily
+            }
+
+            TextField {
+              id: eventDescriptionField
+              width: parent.width
+              placeholderText: qsTr("Description (optional)")
+              foreground: root.contentForeground
+              font.family: root.contentFontFamily
+            }
+
+            Text {
+              width: parent.width
+              visible: root.eventFormError !== ""
+              text: root.eventFormError
+              color: Color.accent
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Item {
+              width: parent.width
+              height: Math.max(cancelButton.height, saveButton.height)
+
+              Rectangle {
+                id: cancelButton
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                width: cancelLabel.implicitWidth + Style.space(16)
+                height: cancelLabel.implicitHeight + Style.space(8)
+                radius: height / 2
+                color: cancelHover.hovered
+                  ? Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.08)
+                  : "transparent"
+                border.width: Style.spacing.hairline
+                border.color: Qt.darker(root.contentForeground, 2.4)
+
+                HoverHandler { id: cancelHover; cursorShape: Qt.PointingHandCursor }
+                TapHandler { onTapped: root.closeEventForm() }
+
+                Text {
+                  id: cancelLabel
+                  anchors.centerIn: parent
+                  text: qsTr("Cancel")
+                  color: root.contentForeground
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+
+              Rectangle {
+                id: deleteButton
+                visible: root.editingEvent !== null
+                anchors.left: cancelButton.right
+                anchors.leftMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                width: deleteLabel.implicitWidth + Style.space(16)
+                height: deleteLabel.implicitHeight + Style.space(8)
+                radius: height / 2
+                opacity: root.eventFormSubmitting ? 0.5 : 1
+                color: deleteHover.hovered
+                  ? Qt.rgba(root.contentForeground.r, root.contentForeground.g, root.contentForeground.b, 0.08)
+                  : "transparent"
+                border.width: Style.spacing.hairline
+                border.color: Qt.darker(root.contentForeground, 2.4)
+
+                HoverHandler { id: deleteHover; cursorShape: Qt.PointingHandCursor }
+                TapHandler { enabled: !root.eventFormSubmitting; onTapped: root.deleteEditingEvent() }
+
+                Text {
+                  id: deleteLabel
+                  anchors.centerIn: parent
+                  text: qsTr("Delete")
+                  color: root.contentForeground
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+
+              Rectangle {
+                id: saveButton
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                width: saveLabel.implicitWidth + Style.space(18)
+                height: saveLabel.implicitHeight + Style.space(8)
+                radius: height / 2
+                opacity: root.eventFormSubmitting ? 0.6 : 1
+                color: Style.selectedStateColor(root.contentForeground, Color.accent)
+
+                HoverHandler { cursorShape: Qt.PointingHandCursor }
+                TapHandler { enabled: !root.eventFormSubmitting; onTapped: root.submitEventForm() }
+
+                Text {
+                  id: saveLabel
+                  anchors.centerIn: parent
+                  text: root.eventFormSubmitting
+                    ? qsTr("Saving…")
+                    : (root.editingEvent ? qsTr("Save") : qsTr("Add"))
+                  color: Color.background
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+            }
           }
 
           // ---- Settings, shown in place of the grid. Everything it changes

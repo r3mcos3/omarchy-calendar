@@ -21,6 +21,8 @@ time away for an event title would be a downgrade you pay for all day.
 
 - Month grid with ISO week numbers, coloured dots per calendar
 - The selected day's agenda under the grid, click any day to see it
+- **Add, edit, and delete events** straight from the panel -- the `+` next to
+  the settings gear starts a new one, the pencil on a row edits it
 - The next event today, with a live countdown, in the panel header
 - The bar label announces what is next, minutes before it starts
 - A **Join** button on meetings that have a video link, shown only from 15
@@ -82,10 +84,16 @@ Run it in a real terminal. It pauses for input, and four steps have to be done
 by hand in the Google Cloud Console.
 
 **You need your own Google OAuth client.** There is no shared one, and that is
-not laziness. `calendar.readonly` is a Google *sensitive* scope, so a publicly
-distributed client would need Google verification and is capped at 100 users
-until it gets it. This is exactly why `gcalcli`'s shared token is currently
-restricted. Every user brings their own credentials.
+not laziness. `calendar` (full access, not `calendar.readonly` -- adding and
+editing events needs write access) is a Google *sensitive* scope, so a
+publicly distributed client would need Google verification and is capped at
+100 users until it gets it. This is exactly why `gcalcli`'s shared token is
+currently restricted. Every user brings their own credentials.
+
+Ran this before the plugin could write events? The scope widened from
+`calendar.readonly` to `calendar`. Run `sync/setup` again -- it clears the
+cached token and re-prompts the login, so the old read-only grant does not
+keep being served forever.
 
 The script automates what has an API:
 
@@ -112,6 +120,31 @@ Two of those steps are traps, and the script says so at the time:
 
 When it finishes, events land in `~/.local/state/omarchy/calendar-events.json`
 every five minutes and the widget picks them up without a restart.
+
+## Add and edit events
+
+The `+` next to the settings gear opens a new-event form for whichever day is
+selected. The pencil that appears on an event row when you hover it opens the
+same form pre-filled, with a Delete button alongside Save.
+
+A few things are fixed on purpose rather than exposed as fields:
+
+- **The day is not editable.** An event is created on the selected day and an
+  edit stays on the day it was created. Moving one to a different day means
+  deleting it and adding it there instead -- one field fewer to build a picker
+  for, and the calendar grid is right there to pick the new day from.
+- **The calendar picker offers every calendar you sync, not just the ones you
+  can write to.** Writing to one you can only read fails with a clear error
+  from Google rather than silently doing nothing; the alternative -- fetching
+  and tracking each calendar's access role just to grey out a chip -- is a lot
+  of machinery for what amounts to the same message either way.
+
+Saving runs `sync/omarchy-calendar-sync --write-event`, which calls the
+Calendar API directly and then re-syncs immediately, so the change shows up
+in the widget without waiting for the next scheduled run. It needs the
+`calendar` scope from [Sync your Google Calendar](#sync-your-google-calendar)
+above -- a calendar fed from [another source](#use-another-source) has no
+account to write back to, so the form still opens but saving fails.
 
 ## Use another source
 
@@ -221,6 +254,8 @@ systemctl --user list-timers omarchy-calendar-sync.timer
 | Clicking an event opens your calendar but not the event | The link resolves only for the Google account the sync authenticated as. If your browser opens it in a profile signed into a different account, Google falls back to the calendar root. Route `google.com/calendar` to the profile holding that account |
 | The Join button never appears | It only shows from 15 minutes before the start until 15 minutes after the end, and only when the event has a video link |
 | Events are off by a day | Report it. Timezone handling resolves a named IANA zone precisely to avoid this, and there is a regression test for daylight saving transitions |
+| Reading events works, but adding or editing one fails with `403 insufficient scopes` | The token was granted `calendar.readonly` (from before this feature existed). Run `sync/setup` again to re-authenticate with the wider `calendar` scope |
+| Adding or editing fails but the error does not say `403` | Saving reported whatever Google actually said; the message in the form is worth reading before assuming it is a scope problem |
 
 ## Uninstall
 

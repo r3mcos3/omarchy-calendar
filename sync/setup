@@ -18,7 +18,7 @@ PROFILE="${PROFILE:-$HOME/.config/gws-omarchy-calendar}"
 GCLOUD_CONFIG="${GCLOUD_CONFIG:-omarchy-calendar}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SYNC_BIN="$SCRIPT_DIR/omarchy-calendar-sync"
-SCOPE="https://www.googleapis.com/auth/calendar.readonly"
+SCOPE="https://www.googleapis.com/auth/calendar"
 
 step() { printf '\n==> %s\n' "$1"; }
 
@@ -122,20 +122,21 @@ Open:
   https://console.cloud.google.com/auth/scopes?project=$PROJECT_ID
 
   Click "Add or remove scopes"
-  Filter for:  calendar.readonly
+  Filter for:  calendar
   Tick:        $SCOPE
-               ("See and download any calendar you can access")
+               ("See, edit, share, and permanently delete all the calendars
+               you can access using Google Calendar")
   Update, then Save
 
   If Save is greyed out, fill in "How will the scopes be used?" with
-  something like: Read-only display of my own calendar in a desktop
-  status bar widget.
+  something like: Display my calendar in a desktop status bar widget, and
+  let me create, edit, and delete events from it.
 
 Do not skip this. A scope that is not declared here is not offered on the
 consent screen at all, so there is no box to tick, Google grants only your
 email address, and every sync fails with 403 insufficient scopes. Google will
-warn that sensitive scopes need verification; that is expected and harmless
-for personal use, which stays under the unverified cap.
+warn that this is a sensitive scope needing verification; that is expected
+and harmless for personal use, which stays under the unverified cap.
 EOF
 pause
 
@@ -185,17 +186,20 @@ else
 fi
 chmod 600 "$PROFILE/client_secret.json"
 
-step "Signing in with read-only calendar access"
+step "Signing in with full calendar access"
 cat <<'EOF'
-On the consent screen, TICK THE CHECKBOX granting read access to your
-calendars before clicking Continue. It is not ticked for you.
+On the consent screen, TICK THE CHECKBOX granting access to your calendars
+before clicking Continue. It is not ticked for you.
 
 Clicking Continue without it still reports a successful login, but grants only
 your email address, and every sync then fails with 403 insufficient scopes.
 EOF
 # gws caches the access token next to the credentials. A cache minted before
 # the calendar scope was granted keeps being served afterwards, and every
-# call fails with 403 insufficient scopes until it is cleared.
+# call fails with 403 insufficient scopes until it is cleared. The same is
+# true of a cache from before this scope widened from read-only: it has to be
+# cleared once more so a plugin update actually gets to create and edit events
+# rather than silently keep the old read-only token.
 rm -f "$PROFILE/token_cache.json"
 GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$PROFILE" gws auth login --scopes "$SCOPE"
 
@@ -213,7 +217,7 @@ unticked. Run this script again and tick it.
 EOF
   exit 1
 fi
-echo "  calendar.readonly granted"
+echo "  calendar access granted"
 
 step "Verifying calendar access"
 # Surface a real error rather than reading `items` out of an error body and

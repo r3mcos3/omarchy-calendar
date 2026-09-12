@@ -147,7 +147,7 @@ def run(client, cfg, now, out_path, local_tz):
         print(
             "if this is an auth error, run: "
             "GOOGLE_WORKSPACE_CLI_CONFIG_DIR=" + str(cfg["profile"]) + " "
-            "gws auth login --scopes https://www.googleapis.com/auth/calendar.readonly",
+            "gws auth login --scopes https://www.googleapis.com/auth/calendar",
             file=sys.stderr,
         )
         return EXIT_SYNC_FAILED
@@ -173,6 +173,12 @@ def main(argv=None):
     )
     parser.add_argument("--config", default=None, help="path to calendar-sync.json")
     parser.add_argument("--out", default=None, help="path to the contract file")
+    parser.add_argument(
+        "--write-event",
+        action="store_true",
+        help="Read one create/update/delete action as JSON from stdin, apply it "
+        "via the Calendar API, resync, and print a JSON result",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -180,6 +186,21 @@ def main(argv=None):
     except config_module.ConfigError as error:
         print(f"config error: {error}", file=sys.stderr)
         return EXIT_BAD_CONFIG
+
+    if args.write_event:
+        # Local import: this is the only path that needs it, and it pulls in
+        # nothing the plain sync loop doesn't already use.
+        from . import write as write_module
+
+        try:
+            payload = json.loads(sys.stdin.read())
+        except json.JSONDecodeError as error:
+            print(json.dumps({"status": "error", "message": f"invalid JSON on stdin: {error}"}))
+            return EXIT_BAD_CONFIG
+
+        result = write_module.handle(payload, cfg)
+        print(json.dumps(result))
+        return EXIT_OK if result.get("status") == "success" else EXIT_SYNC_FAILED
 
     out_path = Path(args.out) if args.out else contract.CONTRACT_PATH
     now = datetime.now(timezone.utc)

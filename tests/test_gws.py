@@ -198,6 +198,75 @@ class TestErrors(unittest.TestCase):
             client.events("a", "MIN", "MAX")
 
 
+class TestInsertEvent(unittest.TestCase):
+    def test_passes_calendar_id_in_params_and_body_in_json(self):
+        runner = FakeRunner({"insert": (0, json.dumps({"id": "new-evt"}), "")})
+        client = gws.Gws("/tmp/profile", runner=runner)
+        result = client.insert_event("a@example.com", {"summary": "Lunch"})
+
+        self.assertEqual(result["id"], "new-evt")
+        argv = runner.calls[0][0]
+        self.assertEqual(argv[:3], ["gws", "calendar", "events"])
+        params = json.loads(argv[argv.index("--params") + 1])
+        self.assertEqual(params, {"calendarId": "a@example.com"})
+        body = json.loads(argv[argv.index("--json") + 1])
+        self.assertEqual(body, {"summary": "Lunch"})
+
+    def test_403_raises_auth_error(self):
+        body = json.dumps({"error": {"code": 403, "message": "insufficient scopes"}})
+        client = gws.Gws("/tmp/profile", runner=FakeRunner({"insert": (0, body, "")}))
+        with self.assertRaises(gws.GwsAuthError):
+            client.insert_event("a", {"summary": "x"})
+
+
+class TestPatchEvent(unittest.TestCase):
+    def test_passes_calendar_and_event_id_in_params(self):
+        runner = FakeRunner({"patch": (0, json.dumps({"id": "evt1"}), "")})
+        client = gws.Gws("/tmp/profile", runner=runner)
+        client.patch_event("a@example.com", "evt1", {"summary": "Renamed"})
+
+        argv = runner.calls[0][0]
+        params = json.loads(argv[argv.index("--params") + 1])
+        self.assertEqual(params, {"calendarId": "a@example.com", "eventId": "evt1"})
+        body = json.loads(argv[argv.index("--json") + 1])
+        self.assertEqual(body, {"summary": "Renamed"})
+
+
+class TestDeleteEvent(unittest.TestCase):
+    def test_blank_stdout_on_success_is_not_an_error(self):
+        # A DELETE gets a 204 No Content back, and gws prints nothing at all
+        # for a response with no body -- not even "{}".
+        runner = FakeRunner({"delete": (0, "", "keyring noise")})
+        client = gws.Gws("/tmp/profile", runner=runner)
+        self.assertEqual(client.delete_event("a@example.com", "evt1"), {})
+
+    def test_whitespace_only_stdout_is_not_an_error(self):
+        runner = FakeRunner({"delete": (0, "\n", "")})
+        client = gws.Gws("/tmp/profile", runner=runner)
+        self.assertEqual(client.delete_event("a", "evt1"), {})
+
+    def test_passes_calendar_and_event_id(self):
+        runner = FakeRunner({"delete": (0, "", "")})
+        client = gws.Gws("/tmp/profile", runner=runner)
+        client.delete_event("a@example.com", "evt1")
+
+        argv = runner.calls[0][0]
+        params = json.loads(argv[argv.index("--params") + 1])
+        self.assertEqual(params, {"calendarId": "a@example.com", "eventId": "evt1"})
+
+    def test_nonzero_exit_code_raises_even_with_blank_stdout(self):
+        runner = FakeRunner({"delete": (1, "", "not found")})
+        client = gws.Gws("/tmp/profile", runner=runner)
+        with self.assertRaises(gws.GwsApiError):
+            client.delete_event("a", "evt1")
+
+    def test_404_error_body_raises_api_error(self):
+        body = json.dumps({"error": {"code": 404, "message": "Not Found"}})
+        client = gws.Gws("/tmp/profile", runner=FakeRunner({"delete": (0, body, "")}))
+        with self.assertRaises(gws.GwsApiError):
+            client.delete_event("a", "evt1")
+
+
 if __name__ == "__main__":
     unittest.main()
 

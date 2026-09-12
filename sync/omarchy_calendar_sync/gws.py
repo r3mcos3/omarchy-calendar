@@ -111,6 +111,26 @@ class Gws:
             f"gws events list did not finish paginating within {MAX_PAGES} pages"
         )
 
+    def insert_event(self, calendar_id, body):
+        """Create an event. `body` is a Calendar API event resource (summary, start, end, ...)."""
+        params = {"calendarId": calendar_id}
+        return self._json(
+            ["calendar", "events", "insert", "--params", json.dumps(params), "--json", json.dumps(body)]
+        )
+
+    def patch_event(self, calendar_id, event_id, body):
+        """Update an event. `body` carries only the fields being changed."""
+        params = {"calendarId": calendar_id, "eventId": event_id}
+        return self._json(
+            ["calendar", "events", "patch", "--params", json.dumps(params), "--json", json.dumps(body)]
+        )
+
+    def delete_event(self, calendar_id, event_id):
+        """Delete an event. Google answers with 204 No Content, so gws prints
+        nothing at all on success -- there is no body for `_json` to parse."""
+        params = {"calendarId": calendar_id, "eventId": event_id}
+        return self._json_optional(["calendar", "events", "delete", "--params", json.dumps(params)])
+
     def _json(self, args):
         """Run gws and parse stdout.
 
@@ -125,6 +145,26 @@ class Gws:
             excerpt = stderr.strip()[:200] or "no stderr output"
             raise GwsApiError(f"gws exited with code {exit_code}: {excerpt}")
 
+        return self._parse_payload(stdout)
+
+    def _json_optional(self, args):
+        """Like `_json`, but a blank stdout on success is not an error.
+
+        A 204 No Content response has no body, and gws prints nothing at all
+        for one: it only ever prints a response body when there is one.
+        """
+        exit_code, stdout, stderr = self._run(args)
+
+        if exit_code != 0:
+            excerpt = stderr.strip()[:200] or "no stderr output"
+            raise GwsApiError(f"gws exited with code {exit_code}: {excerpt}")
+
+        if not stdout.strip():
+            return {}
+
+        return self._parse_payload(stdout)
+
+    def _parse_payload(self, stdout):
         try:
             payload = json.loads(stdout)
         except json.JSONDecodeError as error:
