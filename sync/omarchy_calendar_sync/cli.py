@@ -166,7 +166,7 @@ def run(client, cfg, now, out_path, local_tz):
     return EXIT_OK
 
 
-def main(argv=None):
+def main(argv=None, stdin=None):
     parser = argparse.ArgumentParser(
         prog="omarchy-calendar-sync",
         description="Sync Google Calendar into the Omarchy calendar widget file.",
@@ -193,7 +193,11 @@ def main(argv=None):
         from . import write as write_module
 
         try:
-            payload = json.loads(sys.stdin.read())
+            # readline, not read: the panel's Process writes one line and
+            # keeps the pipe open rather than closing it, so read() -- which
+            # waits for EOF -- would block forever. The payload is always a
+            # single JSON object on one line, so a line is exactly one payload.
+            payload = json.loads((stdin or sys.stdin).readline())
         except json.JSONDecodeError as error:
             print(json.dumps({"status": "error", "message": f"invalid JSON on stdin: {error}"}))
             return EXIT_BAD_CONFIG

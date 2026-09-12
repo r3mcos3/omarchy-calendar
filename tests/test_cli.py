@@ -232,6 +232,46 @@ class TestOccurrenceKey(unittest.TestCase):
         self.assertEqual(cli.occurrence_key(a), ("u@g", "2026-08-17"))
 
 
+class StdinThatHangsOnRead(io.StringIO):
+    """A stand-in for the panel's pipe: one line is available, but nothing
+    ever closes it. `.read()` (which waits for EOF) would hang forever on
+    the real thing, so raising here catches a reversion to it in a test run
+    that would otherwise just sit there instead of failing."""
+
+    def read(self, *args, **kwargs):
+        raise AssertionError(".read() waits for EOF, which this pipe never sends; use .readline()")
+
+
+class TestWriteEventStdin(unittest.TestCase):
+    def _config_path(self, tmp):
+        path = Path(tmp) / "calendar-sync.json"
+        path.write_text(json.dumps({"profile": str(Path(tmp) / "profile"), "gwsPath": "gws"}))
+        return path
+
+    def test_reads_one_line_rather_than_waiting_for_eof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = json.dumps({"action": "create", "calendarId": "a"}) + "\n"
+            stdin = StdinThatHangsOnRead(payload)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                exit_code = cli.main(["--config", str(self._config_path(tmp)), "--write-event"], stdin=stdin)
+
+        result = json.loads(out.getvalue())
+        self.assertEqual(result["status"], "error")  # no title/start/end: fails validation, never reaches gws
+        self.assertNotEqual(exit_code, 0)
+
+    def test_invalid_json_on_the_line_is_reported_not_raised(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stdin = StdinThatHangsOnRead("not json\n")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli.main(["--config", str(self._config_path(tmp)), "--write-event"], stdin=stdin)
+
+        result = json.loads(out.getvalue())
+        self.assertEqual(result["status"], "error")
+        self.assertIn("invalid JSON", result["message"])
+
+
 class TestDeduplicationAcrossCalendars(unittest.TestCase):
     def test_a_recurring_series_survives_intact(self):
         series = [
